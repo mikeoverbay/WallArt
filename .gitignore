@@ -1,0 +1,16 @@
+# Build output
+build/
+*.bin
+*.elf
+*.hex
+*.map
+
+# OS / OneDrive / editors
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+
+# Local-only: milestone backups and the content-pipeline scratch (history lives in git now)
+backups/
+content/
