@@ -28,7 +28,7 @@ label{display:block;margin:0 0 4px;color:#aaa;font-size:.9rem}
 <input id=glw type=range min=1 max=10 oninput="$('glwv').textContent=this.value" onchange="send('glow',this.value)"></div>
 <div class=row><label>Freq <span id=frqv></span></label>
 <input id=frq type=range min=1 max=10 oninput="$('frqv').textContent=this.value" onchange="send('freq',this.value)"></div>
-<div class=row><label>Text color <span id=huev></span></label>
+<div class=row><label>Color <span id=huev></span></label>
 <input id=hue type=range min=0 max=255 oninput="$('huev').textContent=this.value" onchange="send('hue',this.value)"></div>
 <div class=row><label><input id=rb type=checkbox onchange="send('rainbow',this.checked?1:0)"> Rainbow text</label></div>
 <hr style="border:0;border-top:1px solid #333;margin:18px 0">

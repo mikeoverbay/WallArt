@@ -241,8 +241,9 @@ void patternAnalyzer() {
 // ---- pattern: Star Trek-style starfield ----
 // Single points (no trails). Brightness fades in from dim at the center to bright
 // at the edge, and speed is a SINE function of distance (slow near center, faster
-// as it travels out) -- overall slow drift.
-#define NUM_STARS 20
+// as it travels out) -- overall slow drift. Stars are heat-colored (deep red near the
+// center -> orange -> yellow -> white-hot at the edge); the color slider sets the heat base hue.
+#define NUM_STARS 160
 float starDX[NUM_STARS], starDY[NUM_STARS];   // unit direction from center
 float starR [NUM_STARS];                       // distance from center
 bool  starsInit = false;
@@ -263,7 +264,7 @@ void patternStarfield() {
   }
 
   FastLED.clear();
-  float sm = WEB_SPEED / 2.0f;                  // web Speed slider (nominal 1.0 at WEB_SPEED=2)
+  float sm = WEB_SPEED / 8.0f;                  // web Speed slider (slow; nominal 0.25 at WEB_SPEED=2)
   for (int i = 0; i < NUM_STARS; i++) {
     float rn = starR[i] / maxR;
     if (rn > 1.0f) rn = 1.0f;
@@ -279,7 +280,10 @@ void patternStarfield() {
 
     int b = 15 + (int)(rn * 240.0f);            // fade level: dim at center -> bright at edge
     if (b > 255) b = 255;
-    XY(ix, iy) = CRGB((b * 7) / 8, (b * 7) / 8, b);   // single point, blue-white tint
+    uint8_t bb  = (uint8_t)b;                                    // star temperature
+    uint8_t hue = TEXT_HUE + scale8(bb, 56);                     // heat: base hue -> warmer as it brightens
+    uint8_t sat = (bb < 170) ? 255 : (uint8_t)(255 - (int)(bb - 170) * 2);  // hottest stars wash white
+    XY(ix, iy) = CHSV(hue, sat, bb);                            // heat-colored star (slider sets the base hue)
   }
 }
 
@@ -910,12 +914,13 @@ void setup() {
   delay(500);                       // let the 5V rail stabilize before drawing current
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n[boot] v64 Glow + Freq sliders");
+  Serial.println("\n[boot] v69 Starfield slower");
   pinMode(RESET_BTN_PIN, INPUT_PULLUP);
   for (int i = 0; i < MAX_PATTERNS; i++) { fxSpeed[i] = 2; fxBright[i] = 255; fxHue[i] = 150; fxGlow[i] = 5; fxFreq[i] = 5; }  // per-effect defaults
   for (int i = 0; i < PATTERN_COUNT; i++) {              // per-effect default colors / shaping
     if (!strcmp(PATTERN_NAMES[i], "Plasma")) fxHue[i] = 160;   // blue
     if (!strcmp(PATTERN_NAMES[i], "Fire"))   fxHue[i] = 0;     // warm red/orange base
+    if (!strcmp(PATTERN_NAMES[i], "Starfield")) fxHue[i] = 0;  // heat (warm) base
     if (!strcmp(PATTERN_NAMES[i], "Scope")) { fxHue[i] = 96; fxGlow[i] = 7; fxFreq[i] = 5; }  // green scope, glow~12/freq~20
   }
   loadSettings();                 // restore saved settings (or first-boot defaults)
