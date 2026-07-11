@@ -243,7 +243,7 @@ void patternAnalyzer() {
 // at the edge, and speed is a SINE function of distance (slow near center, faster
 // as it travels out) -- overall slow drift. Stars are heat-colored (deep red near the
 // center -> orange -> yellow -> white-hot at the edge); the color slider sets the heat base hue.
-#define NUM_STARS 160
+#define NUM_STARS 320
 float starDX[NUM_STARS], starDY[NUM_STARS];   // unit direction from center
 float starR [NUM_STARS];                       // distance from center
 bool  starsInit = false;
@@ -577,12 +577,234 @@ void patternScope() {
   }
 }
 
+// ---- pattern: Pong (self-playing, predictive AI, impact-angle returns) ----
+// Two AI paddles rally a ball on steep diagonals. Each return angle is set by WHERE the
+// ball strikes the paddle (centre = shallow, edge = steep) plus a little randomness, and
+// is capped so a crossing takes at most ~2-3 wall bounces. Each paddle PREDICTS the ball's
+// intercept (folding in wall bounces) once the ball is within PONG_LOOKAHEAD columns (until
+// then the paddles bob up and down), aiming to strike it at a random offset. The ball is
+// a white core whose glow PULSES a fresh colour on each paddle hit, then fades.
+// Speed -> ball/paddle speed; Glow -> pulse intensity; Freq -> colour change per hit; Color -> paddle colour.
+#define PONG_PH        3        // paddle height (rows)
+#define PONG_MAX_ANG   1.00f    // steepest return (~57 deg) -> ~2-3 wall bounces per crossing
+#define PONG_MIN_ANG   0.35f    // never dead-flat
+#define PONG_RAND      0.18f    // random jitter (rad, ~+/-10 deg) added to each return angle
+#define PONG_LOOKAHEAD 5        // ball must be within this many columns for a paddle to commit (settable)
+float    pbx, pby, pvx, pvy;               // ball position + unit direction
+float    plY = 3, prY = 3;                 // left/right paddle top row
+float    pongAimL = 0, pongAimR = 0;       // where each paddle aims to strike the ball (-1..1)
+uint8_t  pongHue = 0;                       // pulse hue (advances on each paddle hit)
+uint8_t  pongFlash = 0;                     // impact-pulse intensity (fades between hits)
+int      pongWait = 0;                      // frames paused at centre before serving
+bool     pongInit = false;
+float    pongIdle = 0;                       // idle-bob phase (paddles move up/down until they commit)
+
+float pongRand1() { return (random8() / 255.0f) * 2.0f - 1.0f; }   // -1..1
+
+// Predict the ball's row when it reaches column targetX, folding top/bottom bounces.
+float pongPredictY(float targetX) {
+  if (fabsf(pvx) < 0.001f) return pby;
+  float t = (targetX - pbx) / pvx;
+  if (t < 0) return pby;                                  // moving away
+  float y = pby + pvy * t;
+  float period = 2.0f * (NUM_ROWS - 1);
+  float m = fmodf(y, period); if (m < 0) m += period;
+  return (m <= NUM_ROWS - 1) ? m : period - m;
+}
+
+// New velocity after a paddle hit: angle from impact offset o (-1..1) + randomness, capped.
+void pongReturn(float o, int dir) {
+  o = constrain(o, -1.0f, 1.0f);
+  float ang = o * PONG_MAX_ANG + pongRand1() * PONG_RAND;
+  ang = constrain(ang, -PONG_MAX_ANG, PONG_MAX_ANG);
+  if (fabsf(ang) < PONG_MIN_ANG) ang = (ang < 0 ? -PONG_MIN_ANG : PONG_MIN_ANG);
+  pvx = dir * cosf(ang);
+  pvy = sinf(ang);
+  pongFlash = 255; pongHue += 40 + WEB_FREQ * 12;         // pulse a fresh colour on impact
+}
+
+void pongServe(int dir) {                  // dir = +1 serve right, -1 serve left
+  pbx = (LEDS_PER_ROW - 1) / 2.0f;
+  pby = (NUM_ROWS - 1) / 2.0f;
+  float ang = PONG_MIN_ANG + (random8() / 255.0f) * (PONG_MAX_ANG - PONG_MIN_ANG);
+  pvx = dir * cosf(ang);
+  pvy = ((random8() & 1) ? 1.0f : -1.0f) * sinf(ang);
+  if (dir > 0) pongAimR = pongRand1(); else pongAimL = pongRand1();   // receiving paddle's aim
+  pongWait = 14;
+}
+
+// Move one paddle: predict the intercept and aim to strike the ball at offset `aim` when the
+// ball is heading in and within reach; otherwise ease back toward centre.
+void pongAI(float &pY, float targetX, bool incoming, float aim, float pStep, float idleOff) {
+  float mid  = (NUM_ROWS - PONG_PH) / 2.0f;
+  float want = mid + mid * sinf(pongIdle + idleOff);                 // bob up/down while idle
+  if (incoming && fabsf(targetX - pbx) <= PONG_LOOKAHEAD)            // ...until it's time to commit
+    want = pongPredictY(targetX) - (PONG_PH - 1) / 2.0f * (1.0f + aim);
+  pY += constrain(want - pY, -pStep, pStep);
+  pY  = constrain(pY, 0.0f, (float)(NUM_ROWS - PONG_PH));
+}
+
+void patternPong() {
+  if (!pongInit) { pongServe((random8() & 1) ? 1 : -1); pongInit = true; }
+  float spd = 0.10f + WEB_SPEED * 0.035f;            // ball speed (cells/frame)
+  pongFlash = qsub8(pongFlash, 12);                  // impact pulse fades each frame
+  pongIdle += 0.05f; if (pongIdle > TWO_PI) pongIdle -= TWO_PI;   // idle-bob animation
+
+  if (pongWait > 0) {
+    pongWait--;
+  } else {
+    pbx += pvx * spd;  pby += pvy * spd;
+    if (pby < 0)            { pby = 0;            pvy = -pvy; }
+    if (pby > NUM_ROWS - 1) { pby = NUM_ROWS - 1; pvy = -pvy; }
+
+    float pStep = 0.15f + WEB_SPEED * 0.06f;          // paddle tracking speed (fast enough to intercept)
+    pongAI(plY, 1.0f,                pvx < 0, pongAimL, pStep, 0.0f);   // left paddle
+    pongAI(prY, LEDS_PER_ROW - 2.0f, pvx > 0, pongAimR, pStep, PI);     // right paddle (opposite bob)
+
+    int   by   = lroundf(pby);
+    float half = (PONG_PH - 1) / 2.0f;
+    if (pvx < 0 && pbx <= 1.0f) {                     // reached left paddle
+      if (by >= lroundf(plY) && by < lroundf(plY) + PONG_PH) {
+        pbx = 1.0f;
+        pongReturn((pby - (plY + half)) / half, +1); // return angle from where it hit
+        pongAimR = pongRand1();                       // right paddle picks its next aim
+      }
+    } else if (pvx > 0 && pbx >= LEDS_PER_ROW - 2.0f) {  // reached right paddle
+      if (by >= lroundf(prY) && by < lroundf(prY) + PONG_PH) {
+        pbx = LEDS_PER_ROW - 2.0f;
+        pongReturn((pby - (prY + half)) / half, -1);
+        pongAimL = pongRand1();
+      }
+    }
+    if (pbx < 0)                 pongServe(+1);         // safety: ball got past -> re-serve
+    if (pbx > LEDS_PER_ROW - 1)  pongServe(-1);
+  }
+
+  FastLED.clear();
+  int lTop = lroundf(plY), rTop = lroundf(prY);
+  for (int k = 0; k < PONG_PH; k++) {
+    XY(0, lTop + k)                = CHSV(TEXT_HUE, 220, 130);   // paddles = court colour
+    XY(LEDS_PER_ROW - 1, rTop + k) = CHSV(TEXT_HUE, 220, 130);
+  }
+  int bx = lroundf(pbx), by = lroundf(pby);
+  uint8_t haloHue = pongHue;                                    // colour set at the last paddle hit
+  uint8_t peak = 60 + WEB_GLOW * 18;                            // impact-pulse brightness (Glow slider)
+  uint8_t base = 18 + WEB_GLOW * 5;                             // faint steady glow between hits
+  uint16_t hb  = base + scale8(peak, pongFlash);               // flares on impact, then fades
+  uint8_t haloBr = hb > 255 ? 255 : (uint8_t)hb;
+  CRGB halo = CHSV(haloHue, 255, haloBr);
+  CRGB hd   = CHSV(haloHue, 255, haloBr / 2);
+  XY(bx + 1, by)     += halo; XY(bx - 1, by)     += halo;
+  XY(bx, by + 1)     += halo; XY(bx, by - 1)     += halo;
+  XY(bx + 1, by + 1) += hd;   XY(bx - 1, by - 1) += hd;
+  XY(bx + 1, by - 1) += hd;   XY(bx - 1, by + 1) += hd;
+  XY(bx, by) = CRGB::White;                                      // bright core on top
+}
+
+// ---- pattern: Defender (self-playing side-scroller) ----
+// A chevron ship holds station on the left while the world scrolls past: 3 rows of
+// jagged terrain at the bottom, red landers drifting in from the right. The ship weaves
+// to line up with the nearest lander and fires; hits burst into an expanding spark.
+// Color -> ship colour; Speed -> scroll/fire/bullet speed. (Parallel arrays, no structs.)
+#define DEF_SHIPX    1      // ship's fixed column (far left)
+#define DEF_RANGE    10     // hold fire until a lander is within this many columns
+#define DEF_ENEMIES  5
+#define DEF_BULLETS  4
+#define DEF_BOOMS    4
+#define DEF_TROWS    3      // terrain rows along the bottom
+float   defScroll = 0, defShipY = 3;
+int     defFireCd = 0, defSpawnCd = 20;
+bool    defInit = false;
+bool    eOn[DEF_ENEMIES]; float eX[DEF_ENEMIES], eY[DEF_ENEMIES];   // landers
+bool    bOn[DEF_BULLETS]; float bX[DEF_BULLETS], bY[DEF_BULLETS];   // ship bullets
+bool    kOn[DEF_BOOMS];   float kX[DEF_BOOMS], kY[DEF_BOOMS]; uint8_t kT[DEF_BOOMS];  // explosions
+
+int defFreeSlot(bool* on, int n) { for (int i = 0; i < n; i++) if (!on[i]) return i; return -1; }
+
+uint8_t defTerrain(int wx) {                       // ground height 1..DEF_TROWS at world column wx
+  int v = sin8(wx * 16) + sin8(wx * 37 + 90);      // 0..510, jagged ridge
+  return 1 + (uint8_t)((v * DEF_TROWS) / 511);
+}
+
+void patternDefender() {
+  if (!defInit) {
+    for (int i = 0; i < DEF_ENEMIES; i++) eOn[i] = false;
+    for (int i = 0; i < DEF_BULLETS; i++) bOn[i] = false;
+    for (int i = 0; i < DEF_BOOMS;   i++) kOn[i] = false;
+    defShipY = 3; defScroll = 0; defFireCd = 0; defSpawnCd = 20; defInit = true;
+  }
+  float scr = 0.05f + WEB_SPEED * 0.03f;                     // world scroll per frame
+  defScroll += scr;
+
+  if (--defSpawnCd <= 0) {                                   // spawn a lander from the right
+    int i = defFreeSlot(eOn, DEF_ENEMIES);
+    if (i >= 0) { eOn[i] = true; eX[i] = LEDS_PER_ROW + 1; eY[i] = 1 + random8(5); }
+    defSpawnCd = 45 + random8(70);
+  }
+  for (int i = 0; i < DEF_ENEMIES; i++) if (eOn[i]) {        // drift left, retire off-screen
+    eX[i] -= scr;
+    if (eX[i] < -1) eOn[i] = false;
+  }
+
+  int tgt = -1; float best = 1e9f;                           // nearest lander ahead AND within range
+  for (int i = 0; i < DEF_ENEMIES; i++)
+    if (eOn[i] && eX[i] > DEF_SHIPX && (eX[i] - DEF_SHIPX) <= DEF_RANGE && eX[i] < best) { best = eX[i]; tgt = i; }
+  float targetY = (tgt >= 0) ? eY[tgt] : 3.0f + 1.6f * sinf(defScroll * 0.4f);  // seek when in range, else bob
+  defShipY += constrain(targetY - defShipY, -0.4f, 0.4f);
+  defShipY  = constrain(defShipY, 1.0f, 5.0f);
+
+  if (--defFireCd <= 0 && tgt >= 0 && fabsf(defShipY - eY[tgt]) < 0.6f) {       // fire when lined up
+    int b = defFreeSlot(bOn, DEF_BULLETS);
+    if (b >= 0) { bOn[b] = true; bX[b] = DEF_SHIPX + 2; bY[b] = defShipY; }
+    defFireCd = 8;
+  }
+
+  float bsp = 0.7f + WEB_SPEED * 0.06f;                      // bullets fly right, check hits
+  for (int b = 0; b < DEF_BULLETS; b++) if (bOn[b]) {
+    bX[b] += bsp;
+    if (bX[b] > LEDS_PER_ROW) { bOn[b] = false; continue; }
+    for (int e = 0; e < DEF_ENEMIES; e++) if (eOn[e]) {
+      if (lroundf(bY[b]) == lroundf(eY[e]) && bX[b] >= eX[e] - 0.5f && bX[b] <= eX[e] + 1.5f) {
+        eOn[e] = false; bOn[b] = false;
+        int k = defFreeSlot(kOn, DEF_BOOMS);
+        if (k >= 0) { kOn[k] = true; kX[k] = eX[e]; kY[k] = eY[e]; kT[k] = 0; }
+        break;
+      }
+    }
+  }
+  for (int k = 0; k < DEF_BOOMS; k++) if (kOn[k]) { if (++kT[k] > 8) kOn[k] = false; }
+
+  // ---- render ----
+  FastLED.clear();
+  int soff = (int)defScroll;
+  for (int x = 0; x < LEDS_PER_ROW; x++) {                   // terrain
+    uint8_t h = defTerrain(x + soff);
+    for (int r = 0; r < h; r++) XY(x, NUM_ROWS - 1 - r) = CHSV(96, 255, 90);   // green ground
+  }
+  for (int k = 0; k < DEF_BOOMS; k++) if (kOn[k]) {          // explosions (expanding yellow)
+    uint8_t br = 255 - kT[k] * 28;
+    int r = kT[k] / 3, cx = lroundf(kX[k]), cy = lroundf(kY[k]);
+    XY(cx, cy) = CHSV(40, 255, br);
+    XY(cx + r, cy) = CHSV(30, 255, br); XY(cx - r, cy) = CHSV(30, 255, br);
+    XY(cx, cy + r) = CHSV(30, 255, br); XY(cx, cy - r) = CHSV(30, 255, br);
+  }
+  for (int e = 0; e < DEF_ENEMIES; e++) if (eOn[e]) {        // landers (red, 2px)
+    int ex = lroundf(eX[e]), ey = lroundf(eY[e]);
+    XY(ex, ey) = CHSV(0, 255, 200); XY(ex + 1, ey) = CHSV(0, 255, 200);
+  }
+  for (int b = 0; b < DEF_BULLETS; b++) if (bOn[b]) XY(lroundf(bX[b]), lroundf(bY[b])) = CRGB::White;
+  int sy = lroundf(defShipY);                                // chevron ship, pointing right
+  XY(DEF_SHIPX,     sy - 1) = CHSV(TEXT_HUE, 255, 220);
+  XY(DEF_SHIPX + 1, sy)     = CHSV(TEXT_HUE, 255, 255);
+  XY(DEF_SHIPX,     sy + 1) = CHSV(TEXT_HUE, 255, 220);
+}
+
 // ---------------- PATTERN REGISTRY ----------------
 // Named list so the (coming) web UI can list/select patterns by name.
 // Parallel arrays (no struct in a function signature -> no Arduino prototype issue).
 typedef void (*PatternFn)();
-const char* const PATTERN_NAMES[] = { "Twinkle", "Rainbow", "Text", "Analyzer", "Starfield", "Compute", "Clock", "Matrix", "Life", "Plasma", "Fire", "Tunnel", "Scope" };
-const PatternFn   PATTERN_FNS[]   = { patternRandomFade, patternRainbowFade, patternScrollText, patternAnalyzer, patternStarfield, patternCompute, patternClock, patternMatrix, patternLife, patternPlasma, patternFire, patternTunnel, patternScope };
+const char* const PATTERN_NAMES[] = { "Twinkle", "Rainbow", "Text", "Analyzer", "Starfield", "Compute", "Clock", "Matrix", "Life", "Plasma", "Fire", "Tunnel", "Scope", "Pong", "Defender" };
+const PatternFn   PATTERN_FNS[]   = { patternRandomFade, patternRainbowFade, patternScrollText, patternAnalyzer, patternStarfield, patternCompute, patternClock, patternMatrix, patternLife, patternPlasma, patternFire, patternTunnel, patternScope, patternPong, patternDefender };
 const int PATTERN_COUNT = sizeof(PATTERN_FNS) / sizeof(PATTERN_FNS[0]);
 int gPatternIndex = 1;   // default: Rainbow
 
@@ -914,7 +1136,7 @@ void setup() {
   delay(500);                       // let the 5V rail stabilize before drawing current
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n[boot] v69 Starfield slower");
+  Serial.println("\n[boot] v75 Defender: left ship + hold fire");
   pinMode(RESET_BTN_PIN, INPUT_PULLUP);
   for (int i = 0; i < MAX_PATTERNS; i++) { fxSpeed[i] = 2; fxBright[i] = 255; fxHue[i] = 150; fxGlow[i] = 5; fxFreq[i] = 5; }  // per-effect defaults
   for (int i = 0; i < PATTERN_COUNT; i++) {              // per-effect default colors / shaping
