@@ -799,12 +799,60 @@ void patternDefender() {
   XY(DEF_SHIPX,     sy + 1) = CHSV(TEXT_HUE, 255, 220);
 }
 
+// ---- pattern: Balls (bouncing balls that leave fading vapor trails) ----
+// Builds up one ball at a time to BALLS_MAX, each a rainbow colour bouncing off the walls
+// and leaving a fading trail (the whole buffer fades a little each frame). Once full it
+// holds ~5s then wipes and rebuilds. Speed -> velocity; Glow -> trail length; Color -> palette.
+#define BALLS_MAX 30
+float    ballX[BALLS_MAX], ballY[BALLS_MAX], ballVX[BALLS_MAX], ballVY[BALLS_MAX];
+uint8_t  ballHue[BALLS_MAX];
+int      ballCount = 0;
+uint32_t ballLastBirth = 0, ballFullSince = 0;
+bool     ballsInit = false;
+
+void ballSpawn() {
+  if (ballCount >= BALLS_MAX) return;
+  int i = ballCount++;
+  ballX[i] = random8(LEDS_PER_ROW);
+  ballY[i] = random8(NUM_ROWS);
+  float a = random16() * (TWO_PI / 65536.0f);
+  ballVX[i] = cosf(a);  ballVY[i] = sinf(a);
+  ballHue[i] = i * 41;                                     // spread hues around the wheel
+}
+
+void ballsReset() {
+  ballCount = 0;  FastLED.clear();
+  ballSpawn();  ballLastBirth = millis();  ballFullSince = 0;
+}
+
+void patternBalls() {
+  if (!ballsInit) { ballsReset(); ballsInit = true; }
+  uint32_t now = millis();
+  if (ballCount < BALLS_MAX) {
+    if (now - ballLastBirth > 900) { ballSpawn(); ballLastBirth = now; }   // a new ball ~ every 0.9s
+  } else {
+    if (ballFullSince == 0) ballFullSince = now;
+    if (now - ballFullSince > 5000) ballsReset();                          // hold 5s at full, then rebuild
+  }
+  uint8_t fade = 44 - WEB_GLOW * 3;                        // higher Glow = longer trail
+  fadeToBlackBy(&leds[0][0], NUM_ROWS * LEDS_PER_ROW, fade);
+  float spd = 0.10f + WEB_SPEED * 0.05f;
+  for (int i = 0; i < ballCount; i++) {
+    ballX[i] += ballVX[i] * spd;  ballY[i] += ballVY[i] * spd;
+    if (ballX[i] < 0)                  { ballX[i] = 0;                ballVX[i] = -ballVX[i]; }
+    else if (ballX[i] > LEDS_PER_ROW-1){ ballX[i] = LEDS_PER_ROW - 1; ballVX[i] = -ballVX[i]; }
+    if (ballY[i] < 0)                  { ballY[i] = 0;                ballVY[i] = -ballVY[i]; }
+    else if (ballY[i] > NUM_ROWS-1)    { ballY[i] = NUM_ROWS - 1;     ballVY[i] = -ballVY[i]; }
+    XY(lroundf(ballX[i]), lroundf(ballY[i])) = CHSV(ballHue[i] + TEXT_HUE, 255, 255);
+  }
+}
+
 // ---------------- PATTERN REGISTRY ----------------
 // Named list so the (coming) web UI can list/select patterns by name.
 // Parallel arrays (no struct in a function signature -> no Arduino prototype issue).
 typedef void (*PatternFn)();
-const char* const PATTERN_NAMES[] = { "Twinkle", "Rainbow", "Text", "Analyzer", "Starfield", "Compute", "Clock", "Matrix", "Life", "Plasma", "Fire", "Tunnel", "Scope", "Pong", "Defender" };
-const PatternFn   PATTERN_FNS[]   = { patternRandomFade, patternRainbowFade, patternScrollText, patternAnalyzer, patternStarfield, patternCompute, patternClock, patternMatrix, patternLife, patternPlasma, patternFire, patternTunnel, patternScope, patternPong, patternDefender };
+const char* const PATTERN_NAMES[] = { "Twinkle", "Rainbow", "Text", "Analyzer", "Starfield", "Compute", "Clock", "Matrix", "Life", "Plasma", "Fire", "Tunnel", "Scope", "Pong", "Defender", "Balls" };
+const PatternFn   PATTERN_FNS[]   = { patternRandomFade, patternRainbowFade, patternScrollText, patternAnalyzer, patternStarfield, patternCompute, patternClock, patternMatrix, patternLife, patternPlasma, patternFire, patternTunnel, patternScope, patternPong, patternDefender, patternBalls };
 const int PATTERN_COUNT = sizeof(PATTERN_FNS) / sizeof(PATTERN_FNS[0]);
 int gPatternIndex = 1;   // default: Rainbow
 
@@ -1136,7 +1184,7 @@ void setup() {
   delay(500);                       // let the 5V rail stabilize before drawing current
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n[boot] v75 Defender: left ship + hold fire");
+  Serial.println("\n[boot] v76 Balls pattern");
   pinMode(RESET_BTN_PIN, INPUT_PULLUP);
   for (int i = 0; i < MAX_PATTERNS; i++) { fxSpeed[i] = 2; fxBright[i] = 255; fxHue[i] = 150; fxGlow[i] = 5; fxFreq[i] = 5; }  // per-effect defaults
   for (int i = 0; i < PATTERN_COUNT; i++) {              // per-effect default colors / shaping
@@ -1144,6 +1192,7 @@ void setup() {
     if (!strcmp(PATTERN_NAMES[i], "Fire"))   fxHue[i] = 0;     // warm red/orange base
     if (!strcmp(PATTERN_NAMES[i], "Starfield")) fxHue[i] = 0;  // heat (warm) base
     if (!strcmp(PATTERN_NAMES[i], "Scope")) { fxHue[i] = 96; fxGlow[i] = 7; fxFreq[i] = 5; }  // green scope, glow~12/freq~20
+    if (!strcmp(PATTERN_NAMES[i], "Balls")) { fxSpeed[i] = 4; fxGlow[i] = 7; }  // lively bounce, medium trail
   }
   loadSettings();                 // restore saved settings (or first-boot defaults)
 
