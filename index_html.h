@@ -38,7 +38,7 @@ label{display:block;margin:0 0 4px;color:#aaa;font-size:.9rem}
 <div class=row><label>On at</label><input id=on type=time onchange="send('on',this.value)"></div>
 <div class=row><label>Off at</label><input id=off type=time onchange="send('off',this.value)"></div>
 <script>
-var P=["Twinkle","Rainbow","Text","Analyzer","Starfield","Compute","Clock","Matrix","Life","Plasma","Fire","Tunnel","Scope","Pong","Defender","Balls"];
+var P=["Twinkle","Rainbow","Text","Analyzer","Starfield","Compute","Clock","Matrix","Life","Plasma","Fire","Tunnel","Scope","Pong","Defender","Balls","Meteors","Lightning"];
 function $(i){return document.getElementById(i);}
 function send(k,v){var p=fetch('/set?'+k+'='+encodeURIComponent(v));if(k=='pattern'){hi(v);p.then(function(){fetch('/state').then(function(r){return r.json();}).then(load);});}}
 function hi(p){var b=$('patterns').children;for(var i=0;i<b.length;i++)b[i].className=(b[i].textContent==p)?'on':'';}

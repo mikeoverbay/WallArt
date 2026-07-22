@@ -847,18 +847,192 @@ void patternBalls() {
   }
 }
 
+// ---- pattern: Meteors (white meteors streak down and burst into fire on impact) ----
+// Up to METEOR_MAX white meteors fall at random angles + random speeds, leaving fading
+// trails; when one reaches the ground it dies and spawns a small fire-coloured explosion.
+// New meteors arrive after random delays. Speed -> fall rate; Glow -> trail length.
+#define METEOR_MAX 3
+#define MBOOM_MAX  4
+bool     mtOn[METEOR_MAX]; float mtX[METEOR_MAX], mtY[METEOR_MAX], mtVX[METEOR_MAX], mtVY[METEOR_MAX];
+bool     mbOn[MBOOM_MAX];  float mbX[MBOOM_MAX]; uint8_t mbT[MBOOM_MAX];
+uint32_t meteorNextBirth = 0;
+bool     meteorInit = false;
+
+void meteorSpawn() {
+  int i = defFreeSlot(mtOn, METEOR_MAX);
+  if (i < 0) return;
+  mtOn[i] = true;
+  mtX[i] = 3 + random8(LEDS_PER_ROW - 6);                 // start away from the edges (3..16)
+  mtY[i] = -1.0f;                                          // just above the top
+  mtVX[i] = (random8() / 255.0f - 0.5f) * 0.6f;           // angle: -0.3 .. 0.3
+  mtVY[i] = 0.30f + (random8() / 255.0f) * 0.30f;         // random fall speed 0.30 .. 0.60
+}
+
+void patternMeteors() {
+  if (!meteorInit) {
+    for (int i = 0; i < METEOR_MAX; i++) mtOn[i] = false;
+    for (int k = 0; k < MBOOM_MAX; k++)  mbOn[k] = false;
+    meteorNextBirth = millis(); meteorInit = true; FastLED.clear();
+  }
+  uint32_t now = millis();
+  if (now >= meteorNextBirth) { meteorSpawn(); meteorNextBirth = now + random16(400, 1600); }  // random birth delay
+
+  uint8_t fade = 60 - WEB_GLOW * 4;                        // higher Glow = longer trail
+  fadeToBlackBy(&leds[0][0], NUM_ROWS * LEDS_PER_ROW, fade);
+  for (int x = 0; x < LEDS_PER_ROW; x++) XY(x, NUM_ROWS - 1) = CHSV(18, 160, 22);   // dim ground
+
+  for (int k = 0; k < MBOOM_MAX; k++) if (mbOn[k]) {       // fire explosions
+    uint8_t t = mbT[k];
+    if (t >= 16) { mbOn[k] = false; continue; }
+    uint8_t v = 255 - t * 15;                              // fade 255 -> 30
+    int cx = lroundf(mbX[k]);
+    int r = (t < 5) ? 1 : 2;                               // small, brief growth
+    for (int dx = -r; dx <= r; dx++) for (int dy = -r; dy <= 0; dy++) {
+      int dd = dx * dx + dy * dy;
+      if (dd <= r * r) {
+        uint8_t hue = (dd <= 1) ? 38 : (dd <= 4 ? 16 : 2); // yellow core -> orange -> red
+        uint8_t sat = (dd <= 1) ? 130 : 255;               // core whiter-hot
+        XY(cx + dx, (NUM_ROWS - 1) + dy) = CHSV(hue, sat, v);
+      }
+    }
+    mbT[k]++;
+  }
+
+  float spd = 0.6f + WEB_SPEED * 0.12f;                    // fall-rate multiplier
+  for (int i = 0; i < METEOR_MAX; i++) if (mtOn[i]) {
+    mtX[i] += mtVX[i] * spd; mtY[i] += mtVY[i] * spd;
+    if (mtY[i] >= NUM_ROWS - 1) {                          // impact -> fire burst
+      mtOn[i] = false;
+      int k = defFreeSlot(mbOn, MBOOM_MAX);
+      if (k >= 0) { mbOn[k] = true; mbX[k] = mtX[i]; mbT[k] = 0; }
+      continue;
+    }
+    if (mtX[i] < -1 || mtX[i] > LEDS_PER_ROW) { mtOn[i] = false; continue; }   // drifted off-side
+    XY(lroundf(mtX[i]), lroundf(mtY[i])) = CRGB::White;    // bright white head
+  }
+}
+
+// ---- pattern: Lightning (strikes hitting the ground, staggered) ----
+// Jagged bolts fall from the sky and strike the ground with a horizontal impact
+// flash; a faint sky-flash lights the panel on each birth. Each bolt is a white-hot
+// core with a colour-tinted glow (Color slider = hue). It flashes at full brightness
+// then fades over a "fade time" set by Speed (higher = faster fade), and after a
+// random gap that's ALWAYS shorter than the fade time it restarts -- so the on-screen
+// count keeps overlapping. Freq (1..10) maps to how many strike at once (1..5). New
+// strikes start at least LTG_MIN_SEP columns from every currently-active strike.
+// Speed=fade, Glow=width, Freq=count, Color=hue.
+#define LTG_MAX     5     // hard cap on simultaneous strikes (Freq tops out here)
+#define LTG_MIN_SEP 5     // no new strike may start within this many columns of another
+uint32_t ltgStart[LTG_MAX];              // millis() when the strike began (fade clock)
+uint16_t ltgLife [LTG_MAX];              // fade duration for this strike (ms)
+uint32_t ltgNext [LTG_MAX];              // when an idle slot is allowed to restart
+bool     ltgOn   [LTG_MAX];              // slot currently striking?
+int8_t   ltgPath [LTG_MAX][NUM_ROWS];    // bolt column at each row (top -> ground)
+bool     ltgInit = false;
+
+uint16_t ltgLifeMs() {                    // Speed slider -> fade time (sp1~1520ms .. sp10~350ms)
+  return (uint16_t)(1650 - WEB_SPEED * 130);
+}
+
+// Choose a start column >= LTG_MIN_SEP from every other active strike; if none of the
+// tries clear the gap (only possible at high Freq on a 20-wide panel) keep the roomiest.
+int ltgPickStart(int self, int count) {
+  int best = 2 + random8(LEDS_PER_ROW - 4), bestGap = -1;
+  for (int a = 0; a < 24; a++) {
+    int cand = 2 + random8(LEDS_PER_ROW - 4);         // 2..17 (margin so the glow fits)
+    int gap = 99;
+    for (int i = 0; i < count; i++) {
+      if (i == self || !ltgOn[i]) continue;
+      int dd = abs(cand - ltgPath[i][0]); if (dd < gap) gap = dd;
+    }
+    if (gap >= LTG_MIN_SEP) return cand;              // satisfies the rule -> take it
+    if (gap > bestGap) { bestGap = gap; best = cand; }
+  }
+  return best;
+}
+
+void ltgSpawn(int self, int count, uint32_t now) {
+  int x = ltgPickStart(self, count);
+  for (int r = 0; r < NUM_ROWS; r++) {               // jagged wander top -> ground
+    ltgPath[self][r] = x;
+    uint8_t j = random8(4);                           // -1, 0, 0, +1
+    if (j == 0) x--; else if (j == 3) x++;
+    if (x < 1) x = 1; if (x > LEDS_PER_ROW - 2) x = LEDS_PER_ROW - 2;
+  }
+  ltgStart[self] = now;
+  ltgLife[self]  = ltgLifeMs();
+  ltgOn[self]    = true;
+}
+
+void patternLightning() {
+  int count = map(WEB_FREQ, 1, 10, 1, LTG_MAX);       // Freq 1..10 -> 1..5 on screen
+  if (count < 1) count = 1; if (count > LTG_MAX) count = LTG_MAX;
+  uint32_t now = millis();
+  if (!ltgInit) {                                     // stagger first strikes within < one fade time
+    for (int i = 0; i < LTG_MAX; i++) { ltgOn[i] = false; ltgNext[i] = now + random16((uint16_t)(ltgLifeMs() * 0.6f)); }
+    ltgInit = true;
+  }
+
+  FastLED.clear();
+  for (int x = 0; x < LEDS_PER_ROW; x++) XY(x, NUM_ROWS - 1) += CRGB(9, 13, 24);   // faint ground line
+
+  float spread = (WEB_GLOW - 1) / 3.0f;               // Glow -> half-width 0 (tight) .. 3 (wide)
+  CRGB  gcol   = CHSV(TEXT_HUE, 190, 255);            // tinted glow colour (core stays white)
+  float sky    = 0;                                   // brightest birth-flash this frame
+
+  for (int i = 0; i < count; i++) {
+    if (!ltgOn[i]) { if ((int32_t)(now - ltgNext[i]) >= 0) ltgSpawn(i, count, now); }
+    if (!ltgOn[i]) continue;
+
+    uint32_t age = now - ltgStart[i];
+    if (age >= ltgLife[i]) {                           // finished -> idle, restart after a short gap
+      ltgOn[i] = false;
+      float g  = (0.12f + (random8() / 255.0f) * 0.45f) * ltgLife[i];   // gap < fade time
+      ltgNext[i] = now + (uint32_t)g;
+      continue;
+    }
+
+    float inten = 1.0f - (float)age / ltgLife[i];      // full at strike, fades to 0
+    if (age < 90) { float s = (1.0f - age / 90.0f) * 0.4f * inten; if (s > sky) sky = s; }
+
+    for (int r = 0; r < NUM_ROWS; r++) {               // bolt: white core + tinted glow
+      int cx = ltgPath[i][r];
+      for (int dx = -4; dx <= 4; dx++) {
+        int d = abs(dx); if (d > spread + 0.6f) continue;
+        float w = 1.0f - d / (spread + 0.75f); if (w <= 0) continue;
+        CRGB c = gcol; c.nscale8((uint8_t)(inten * w * 255)); XY(cx + dx, r) += c;
+      }
+      uint8_t v = (uint8_t)(inten * 255); XY(cx, r) += CRGB(v, v, v);
+    }
+
+    int   imp = ltgPath[i][NUM_ROWS - 1];              // ground impact flash (spreads sideways)
+    float fl  = inten * inten;
+    for (int dx = -4; dx <= 4; dx++) {
+      float w = 1.0f - fabsf((float)dx) / 4.2f; if (w <= 0) continue;
+      uint8_t vv = (uint8_t)(255 * fl * w);
+      XY(imp + dx, NUM_ROWS - 1) += CRGB(vv, vv, vv);
+      XY(imp + dx, NUM_ROWS - 2) += CRGB((uint8_t)(120 * fl * w), (uint8_t)(120 * fl * w), (uint8_t)(140 * fl * w));
+    }
+  }
+
+  if (sky > 0) {                                       // ambient sky-flash over the whole panel
+    CRGB s = CRGB((uint8_t)(40 * sky), (uint8_t)(48 * sky), (uint8_t)(70 * sky));
+    for (int i = 0; i < NUM_ROWS * LEDS_PER_ROW; i++) (&leds[0][0])[i] += s;
+  }
+}
+
 // ---------------- PATTERN REGISTRY ----------------
 // Named list so the (coming) web UI can list/select patterns by name.
 // Parallel arrays (no struct in a function signature -> no Arduino prototype issue).
 typedef void (*PatternFn)();
-const char* const PATTERN_NAMES[] = { "Twinkle", "Rainbow", "Text", "Analyzer", "Starfield", "Compute", "Clock", "Matrix", "Life", "Plasma", "Fire", "Tunnel", "Scope", "Pong", "Defender", "Balls" };
-const PatternFn   PATTERN_FNS[]   = { patternRandomFade, patternRainbowFade, patternScrollText, patternAnalyzer, patternStarfield, patternCompute, patternClock, patternMatrix, patternLife, patternPlasma, patternFire, patternTunnel, patternScope, patternPong, patternDefender, patternBalls };
+const char* const PATTERN_NAMES[] = { "Twinkle", "Rainbow", "Text", "Analyzer", "Starfield", "Compute", "Clock", "Matrix", "Life", "Plasma", "Fire", "Tunnel", "Scope", "Pong", "Defender", "Balls", "Meteors", "Lightning" };
+const PatternFn   PATTERN_FNS[]   = { patternRandomFade, patternRainbowFade, patternScrollText, patternAnalyzer, patternStarfield, patternCompute, patternClock, patternMatrix, patternLife, patternPlasma, patternFire, patternTunnel, patternScope, patternPong, patternDefender, patternBalls, patternMeteors, patternLightning };
 const int PATTERN_COUNT = sizeof(PATTERN_FNS) / sizeof(PATTERN_FNS[0]);
 int gPatternIndex = 1;   // default: Rainbow
 
 // per-effect saved settings. Sized to a fixed max (not PATTERN_COUNT) so adding
 // patterns later doesn't change the NVS blob size and wipe saved per-effect settings.
-#define MAX_PATTERNS 16
+#define MAX_PATTERNS 20   // room to grow; loadSettings tolerates a smaller saved blob
 uint8_t fxSpeed [MAX_PATTERNS];   // 1..10
 uint8_t fxBright[MAX_PATTERNS];   // 0..255 master brightness
 uint8_t fxHue   [MAX_PATTERNS];   // 0..255 color
@@ -992,11 +1166,13 @@ void loadSettings() {
   prefs.begin("wallart", true);          // read-only
   gPatternIndex     = prefs.getInt("pat", gPatternIndex);
   // POWER_ON not persisted -> panel always boots On so the schedule governs after a power loss
-  if (prefs.getBytesLength("fxspd") == sizeof(fxSpeed))  prefs.getBytes("fxspd", fxSpeed,  sizeof(fxSpeed));
-  if (prefs.getBytesLength("fxbri") == sizeof(fxBright)) prefs.getBytes("fxbri", fxBright, sizeof(fxBright));
-  if (prefs.getBytesLength("fxhue") == sizeof(fxHue))    prefs.getBytes("fxhue", fxHue,    sizeof(fxHue));
-  if (prefs.getBytesLength("fxglw") == sizeof(fxGlow))   prefs.getBytes("fxglw", fxGlow,   sizeof(fxGlow));
-  if (prefs.getBytesLength("fxfrq") == sizeof(fxFreq))   prefs.getBytes("fxfrq", fxFreq,   sizeof(fxFreq));
+  // load a saved blob even if it's shorter than the array (e.g. after MAX_PATTERNS grew):
+  // getBytes copies the stored bytes into the first slots; the rest keep their defaults.
+  if (prefs.getBytesLength("fxspd") > 0) prefs.getBytes("fxspd", fxSpeed,  sizeof(fxSpeed));
+  if (prefs.getBytesLength("fxbri") > 0) prefs.getBytes("fxbri", fxBright, sizeof(fxBright));
+  if (prefs.getBytesLength("fxhue") > 0) prefs.getBytes("fxhue", fxHue,    sizeof(fxHue));
+  if (prefs.getBytesLength("fxglw") > 0) prefs.getBytes("fxglw", fxGlow,   sizeof(fxGlow));
+  if (prefs.getBytesLength("fxfrq") > 0) prefs.getBytes("fxfrq", fxFreq,   sizeof(fxFreq));
   for (int i = 0; i < MAX_PATTERNS; i++) {              // keep loaded 1..10 sliders in range
     if (fxSpeed[i] < 1) fxSpeed[i] = 1;  if (fxSpeed[i] > 10) fxSpeed[i] = 10;
     if (fxGlow[i]  < 1) fxGlow[i]  = 1;  if (fxGlow[i]  > 10) fxGlow[i]  = 10;
@@ -1184,7 +1360,7 @@ void setup() {
   delay(500);                       // let the 5V rail stabilize before drawing current
   Serial.begin(115200);
   delay(200);
-  Serial.println("\n[boot] v76 Balls pattern");
+  Serial.println("\n[boot] v78 Lightning pattern");
   pinMode(RESET_BTN_PIN, INPUT_PULLUP);
   for (int i = 0; i < MAX_PATTERNS; i++) { fxSpeed[i] = 2; fxBright[i] = 255; fxHue[i] = 150; fxGlow[i] = 5; fxFreq[i] = 5; }  // per-effect defaults
   for (int i = 0; i < PATTERN_COUNT; i++) {              // per-effect default colors / shaping
@@ -1193,6 +1369,8 @@ void setup() {
     if (!strcmp(PATTERN_NAMES[i], "Starfield")) fxHue[i] = 0;  // heat (warm) base
     if (!strcmp(PATTERN_NAMES[i], "Scope")) { fxHue[i] = 96; fxGlow[i] = 7; fxFreq[i] = 5; }  // green scope, glow~12/freq~20
     if (!strcmp(PATTERN_NAMES[i], "Balls")) { fxSpeed[i] = 4; fxGlow[i] = 7; }  // lively bounce, medium trail
+    if (!strcmp(PATTERN_NAMES[i], "Meteors")) { fxSpeed[i] = 4; fxGlow[i] = 6; }  // brisk fall, streaky trail
+    if (!strcmp(PATTERN_NAMES[i], "Lightning")) { fxHue[i] = 160; fxSpeed[i] = 6; fxGlow[i] = 4; fxFreq[i] = 6; }  // blue-white, medium fade/width, ~3 on screen
   }
   loadSettings();                 // restore saved settings (or first-boot defaults)
 
